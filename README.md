@@ -56,3 +56,9 @@ A Empty case means the method is unimplemented on the client or device side.
 The `service` module provides automatic device discovery and management with support
 for multiple concurrent consumers. See [SERVICE.md](SERVICE.md) for detailed
 documentation and usage examples.
+
+## Contributing
+
+If you use AI tools while contributing, read and follow the
+[AI policy](AI_POLICY.md). Contributors are responsible for understanding and
+explaining their own work in their own words.
