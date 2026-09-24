@@ -63,8 +63,8 @@ and approves on the signer. Start the bridge, then use the CLI:
 cargo run -p async-hwi-cli -- --network regtest xpub get --path "m/48h/1h/0h/2h"
 ```
 
-The CLI selects a running bridge before USB discovery. Its `/info` probe does not
-start an optical exchange. `THUNDERDEN_BRIDGE_URL` overrides
+The CLI selects a running bridge before USB discovery. `device list` reports bridge
+availability without scanning the offline signer. `THUNDERDEN_BRIDGE_URL` overrides
 `http://127.0.0.1:32123/exchange`; only HTTP on `127.0.0.1` is accepted. This local
 API trusts programs on the computer and requires no credentials. Library callers
 use `HttpTransport::connect(url).await`, construct `ThunderDen` with that transport

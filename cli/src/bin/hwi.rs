@@ -148,6 +148,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         Commands::Device(DeviceCommands::List) => {
             for device in command::list(args.network, None).await? {
+                if device.device_kind() == DeviceKind::ThunderDen {
+                    eprintln!("thunderden QR bridge available (offline signer not verified)");
+                    continue;
+                }
                 eprint!("{}", device.get_master_fingerprint().await?);
                 eprint!(" {}", device.device_kind());
                 if let Ok(version) = device.get_version().await.map(|v| v.to_string()) {
