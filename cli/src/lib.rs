@@ -5,6 +5,7 @@ pub mod command {
         jade::{self, Jade},
         ledger::{HidApi, Ledger, LedgerSimulator, TransportHID},
         specter::{Specter, SpecterSimulator},
+        thunderden::{HttpTransport, ThunderDen},
         HWI,
     };
     use bitcoin::{hashes::hex::FromHex, Network};
@@ -20,6 +21,34 @@ pub mod command {
         network: Network,
         wallet: Option<Wallet<'_>>,
     ) -> Result<Vec<Box<dyn HWI + Send>>, Box<dyn Error>> {
+        let url = std::env::var("THUNDERDEN_BRIDGE_URL").ok();
+        let transport = match HttpTransport::connect(
+            url.as_deref().unwrap_or("http://127.0.0.1:32123/exchange"),
+        )
+        .await
+        {
+            Ok(transport) => Some(transport),
+            Err(e) if url.is_some() => return Err(e.into()),
+            Err(_) => None,
+        };
+        if let Some(transport) = transport {
+            let mut device = ThunderDen::new(transport, network)?;
+            if let Some(wallet) = wallet {
+                let hmac = wallet
+                    .hmac
+                    .map(|text| <[u8; 32]>::from_hex(text))
+                    .transpose()?;
+                device = device.with_wallet(
+                    wallet.name.ok_or("Thunder Den requires a wallet name")?,
+                    wallet
+                        .policy
+                        .ok_or("Thunder Den requires a wallet policy")?,
+                    hmac,
+                )?;
+            }
+            return Ok(vec![device.into()]);
+        }
+
         let mut hws = Vec::new();
 
         if let Ok(device) = SpecterSimulator::try_connect().await {

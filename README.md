@@ -44,12 +44,37 @@ A Empty case means the method is unimplemented on the client or device side.
 | Jade[^3]             | >= v1.0.30 | >= v1.0.30 | >= v1.0.30 | >= v1.0.30 | >= v1.0.30           | >= v1.0.30 | >= v1.0.30 |
 | Ledger Nano S/S+[^4] | >= v2.1.2  | >= v2.1.2  | >= v2.1.2  | >= v2.1.2  | *check hmac presence | >= v2.1.2  | >= v2.1.2  |
 | Specter[^5]          |            | >= v1.8.0  | >= v1.8.0  | >= v1.8.0  |                      |            | >= v1.8.0  |
+| Thunder Den[^6]      |            | yes        | yes        | yes        | *check proof presence | yes        | yes        |
 
 [^1]: https://github.com/digitalbitbox/bitbox02-firmware
 [^2]: https://github.com/alfred-hodler/rust-coldcard
 [^3]: https://github.com/Blockstream/Jade
 [^4]: https://github.com/LedgerHQ/app-bitcoin-new
 [^5]: https://github.com/cryptoadvance/specter-diy
+[^6]: https://github.com/bitcoinerlab/thunderden
+
+## Thunder Den
+
+The `thunderden` feature is enabled by default. Requests go through the local
+[QR bridge](https://github.com/bitcoinerlab/thunderden-qr-bridge); the user scans
+and approves on the signer. Start the bridge, then use the CLI:
+
+```sh
+cargo run -p async-hwi-cli -- --network regtest xpub get --path "m/48h/1h/0h/2h"
+```
+
+The CLI selects a running bridge before USB discovery. Its `/info` probe does not
+start an optical exchange. `THUNDERDEN_BRIDGE_URL` overrides
+`http://127.0.0.1:32123/exchange`; only HTTP on `127.0.0.1` is accepted. This local
+API trusts programs on the computer and requires no credentials. Library callers
+use `HttpTransport::connect(url).await`, construct `ThunderDen` with that transport
+and network, then use `with_wallet` with a validated public
+descriptor and the proof returned by `register_wallet`. As with Ledger,
+`is_wallet_registered` checks the supplied policy/proof locally. Descriptor
+checksum validation and address derivation belong to the calling wallet.
+
+Development build labels may return `UnsupportedVersion` from `get_version`.
+The optional signer integration test is in `tests/thunderden_native.rs`.
 
 ## Service Module
 
