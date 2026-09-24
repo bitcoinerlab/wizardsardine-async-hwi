@@ -321,10 +321,27 @@ impl<T: Transport + Send + Sync> HWI for ThunderDen<T> {
             Value::Bytes(raw) if raw.len() <= 2 * 1024 * 1024 => raw,
             _ => return Err(Error::Unexpected("Invalid signed PSBT length")),
         };
-        let signed =
+        let mut signed =
             Psbt::deserialize(raw).map_err(|_| Error::Unexpected("Invalid signed PSBT"))?;
         if signed.version != 0 || signed.unsigned_tx != psbt.unsigned_tx {
             return Err(Error::Unexpected("Unsigned transaction changed"));
+        }
+        // Core omits witnesses when returning a previous transaction. Keep the
+        // caller's full transaction only when everything else matches exactly.
+        for (before, after) in psbt.inputs.iter().zip(&mut signed.inputs) {
+            if let (Some(original), Some(returned)) =
+                (&before.non_witness_utxo, &after.non_witness_utxo)
+            {
+                if original != returned {
+                    let mut stripped = original.clone();
+                    for input in &mut stripped.input {
+                        input.witness.clear();
+                    }
+                    if &stripped == returned {
+                        after.non_witness_utxo = Some(original.clone());
+                    }
+                }
+            }
         }
         let added = number(&result[1])?;
         if added == 0 {

@@ -1,5 +1,7 @@
 use super::*;
-use bitcoin::{absolute, psbt::raw, transaction, Amount, ScriptBuf, Transaction, TxIn, TxOut};
+use bitcoin::{
+    absolute, psbt::raw, transaction, Amount, ScriptBuf, Transaction, TxIn, TxOut, Witness,
+};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -266,6 +268,66 @@ async fn bad_signing_replies_leave_the_psbt_untouched() {
         let mut psbt = original.clone();
         assert!(client.sign_tx(&mut psbt).await.is_err());
         assert_eq!(psbt, original);
+    }
+}
+
+#[tokio::test]
+async fn stripped_previous_witness_keeps_the_original_transaction() {
+    let previous = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            witness: Witness::from_slice(&[vec![1, 2]]),
+            ..TxIn::default()
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: ScriptBuf::new(),
+        }],
+    };
+    let mut original = Psbt::from_unsigned_tx(Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: bitcoin::OutPoint::new(previous.compute_txid(), 0),
+            ..TxIn::default()
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(99_000),
+            script_pubkey: ScriptBuf::new(),
+        }],
+    })
+    .unwrap();
+    original.inputs[0].non_witness_utxo = Some(previous.clone());
+    original.inputs[0].witness_utxo = Some(previous.output[0].clone());
+
+    for changed in [false, true] {
+        let mut signed = original.clone();
+        signed.inputs[0].non_witness_utxo.as_mut().unwrap().input[0].witness = if changed {
+            Witness::from_slice(&[vec![3]])
+        } else {
+            Witness::new()
+        };
+        signed.inputs[0].tap_key_sig =
+            Some(bitcoin::taproot::Signature::from_slice(&[1; 64]).unwrap());
+        let client = mock(move |request| {
+            serde_cbor::to_vec(&reply(
+                request,
+                vec![bytes(&signed.serialize()), uint(1), uint(0)],
+            ))
+            .unwrap()
+        })
+        .with_wallet("test", &format!("tr({}/<0;1>/*)", XPUB), Some([0x42; 32]))
+        .unwrap();
+        let mut psbt = original.clone();
+        if changed {
+            assert!(client.sign_tx(&mut psbt).await.is_err());
+            assert_eq!(psbt, original);
+        } else {
+            client.sign_tx(&mut psbt).await.unwrap();
+            assert_eq!(psbt.inputs[0].non_witness_utxo, Some(previous.clone()));
+            assert!(psbt.inputs[0].tap_key_sig.is_some());
+        }
     }
 }
 
