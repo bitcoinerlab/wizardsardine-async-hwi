@@ -94,8 +94,6 @@ enum XpubCommands {
     Get {
         #[arg(long, value_parser = clap::value_parser!(bitcoin::bip32::DerivationPath))]
         path: DerivationPath,
-        #[arg(long)]
-        with_origin: bool,
     },
 }
 
@@ -150,10 +148,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         Commands::Device(DeviceCommands::List) => {
             for device in command::list(args.network, None).await? {
-                if device.device_kind() == DeviceKind::ThunderDen {
-                    eprintln!("thunderden QR bridge available (offline signer not verified)");
-                    continue;
-                }
                 eprint!("{}", device.get_master_fingerprint().await?);
                 eprint!(" {}", device.device_kind());
                 if let Ok(version) = device.get_version().await.map(|v| v.to_string()) {
@@ -162,25 +156,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 eprintln!();
             }
         }
-        Commands::Xpub(XpubCommands::Get { path, with_origin }) => {
+        Commands::Xpub(XpubCommands::Get { path }) => {
             for device in command::list(args.network, None).await? {
                 if let Some(fg) = args.fingerprint {
                     if fg != device.get_master_fingerprint().await? {
                         continue;
                     }
                 }
-                let xpub = device.get_extended_pubkey(&path).await?;
-                if with_origin {
-                    let fingerprint = device.get_master_fingerprint().await?;
-                    let origin = if path.is_empty() {
-                        fingerprint.to_string()
-                    } else {
-                        format!("{fingerprint}/{path}")
-                    };
-                    eprintln!("[{origin}]{xpub}");
-                } else {
-                    eprintln!("{xpub}");
-                }
+                eprintln!("{}", device.get_extended_pubkey(&path).await?);
             }
         }
         Commands::Wallet(WalletCommands::Register { name, policy }) => {

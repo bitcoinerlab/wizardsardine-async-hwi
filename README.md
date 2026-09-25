@@ -53,31 +53,6 @@ A Empty case means the method is unimplemented on the client or device side.
 [^5]: https://github.com/cryptoadvance/specter-diy
 [^6]: https://github.com/bitcoinerlab/thunderden
 
-## Thunder Den
-
-The `thunderden` feature is enabled by default. Requests go through the local
-[QR bridge](https://github.com/bitcoinerlab/thunderden-qr-bridge); the user scans
-and approves on the signer. Start the bridge, then use the CLI:
-
-```sh
-cargo run -p async-hwi-cli -- --network regtest xpub get --path "m/48h/1h/0h/2h"
-```
-
-The CLI selects a running bridge before USB discovery. `device list` reports bridge
-availability without scanning the offline signer. `xpub get --with-origin` prints
-`[fingerprint/path]xpub` from one QR exchange; plain `xpub get` prints just the
-xpub. `THUNDERDEN_BRIDGE_URL` overrides
-`http://127.0.0.1:32123/exchange`; only HTTP on `127.0.0.1` is accepted. This local
-API trusts programs on the computer and requires no credentials. Library callers
-use `HttpTransport::connect(url).await`, construct `ThunderDen` with that transport
-and network, then use `with_wallet` with a validated public
-descriptor and the proof returned by `register_wallet`. As with Ledger,
-`is_wallet_registered` checks the supplied policy/proof locally. Descriptor
-checksum validation and address derivation belong to the calling wallet.
-
-Development build labels may return `UnsupportedVersion` from `get_version`.
-The optional signer integration test is in `tests/thunderden_native.rs`.
-
 ## Service Module
 
 The `service` module provides automatic device discovery and management with support

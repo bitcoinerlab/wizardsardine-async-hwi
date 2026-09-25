@@ -139,6 +139,14 @@ async fn missing_keys_and_proof_do_not_send() {
         Err(Error::MissingPolicy)
     ));
     assert_eq!(format!("{:?}", client), "ThunderDen { network: Regtest }");
+    let client = client
+        .with_wallet("test", &policy, Some([0x42; 32]))
+        .unwrap();
+    assert!(client.is_wallet_registered("test", &policy).await.unwrap());
+    assert!(!client
+        .is_wallet_registered("renamed", &policy)
+        .await
+        .unwrap());
 }
 
 #[tokio::test]
@@ -150,6 +158,12 @@ async fn address_reply_and_index_are_checked() {
         ("invalid address".into(), false),
     ] {
         let client = mock(move |request| {
+            let value: Value = serde_cbor::from_slice(request).unwrap();
+            let request_value = array(&value, 5).unwrap();
+            assert_eq!(request_value[3], uint(3));
+            let args = array(&request_value[4], 4).unwrap();
+            assert_eq!(args[2], uint(1));
+            assert_eq!(args[3], uint(17));
             serde_cbor::to_vec(&reply(request, vec![Value::Text(address.clone())])).unwrap()
         })
         .with_wallet("test", &format!("tr({}/<0;1>/*)", XPUB), Some([0x42; 32]))
@@ -167,8 +181,8 @@ async fn address_reply_and_index_are_checked() {
         assert_eq!(
             client
                 .display_address(&AddressScript::Miniscript {
-                    index: 0,
-                    change: false,
+                    index: 17,
+                    change: true,
                 })
                 .await
                 .is_ok(),

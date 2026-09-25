@@ -21,6 +21,8 @@ pub mod command {
         network: Network,
         wallet: Option<Wallet<'_>>,
     ) -> Result<Vec<Box<dyn HWI + Send>>, Box<dyn Error>> {
+        let mut hws = Vec::new();
+
         let url = std::env::var("THUNDERDEN_BRIDGE_URL").ok();
         let transport = match HttpTransport::connect(
             url.as_deref().unwrap_or("http://127.0.0.1:32123/exchange"),
@@ -33,7 +35,7 @@ pub mod command {
         };
         if let Some(transport) = transport {
             let mut device = ThunderDen::new(transport, network)?;
-            if let Some(wallet) = wallet {
+            if let Some(ref wallet) = wallet {
                 let hmac = wallet
                     .hmac
                     .map(|text| <[u8; 32]>::from_hex(text))
@@ -46,10 +48,8 @@ pub mod command {
                     hmac,
                 )?;
             }
-            return Ok(vec![device.into()]);
+            hws.push(device.into());
         }
-
-        let mut hws = Vec::new();
 
         if let Ok(device) = SpecterSimulator::try_connect().await {
             hws.push(device.into());

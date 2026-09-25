@@ -149,7 +149,6 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_cbor",
- "serde_json",
  "serialport",
  "tokio",
  "tokio-serial",
