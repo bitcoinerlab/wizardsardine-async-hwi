@@ -1,4 +1,8 @@
-//! Thunder Den's user-operated QR interface, via a local companion.
+//! Client for an offline device running Thunder Den.
+//!
+//! The local [QR bridge](https://github.com/bitcoinerlab/thunderden-qr-bridge)
+//! displays request QR codes and captures replies in a browser. This module
+//! handles the protocol messages; camera and QR handling stay in the bridge.
 mod http;
 #[cfg(test)]
 mod tests;
@@ -84,7 +88,8 @@ impl<T: Transport + Send + Sync> ThunderDen<T> {
         // One exchange per client. Holding the async mutex also serializes callers
         // through the HWI trait's shared-reference methods.
         let mut state = self.state.lock().await;
-        // Check GET_INFO's cache under the exchange lock to avoid duplicate scans.
+        // GET_INFO (operation 0) returns the fingerprint and application version.
+        // Check its cache under the exchange lock to avoid duplicate QR scans.
         if operation == 0 && state.info.is_some() {
             return Ok(Value::Array(vec![]));
         }
@@ -104,7 +109,13 @@ impl<T: Transport + Send + Sync> ThunderDen<T> {
         if request.len() > MAX_REQUEST {
             return Err(Error::UnsupportedInput);
         }
-        let raw = self.transport.exchange(&request).await?;
+        let raw = match self.transport.exchange(&request).await {
+            Err(Error::DeviceDisconnected) => {
+                state.info = None;
+                return Err(Error::DeviceDisconnected);
+            }
+            result => result?,
+        };
         if raw.len() > MAX_REPLY {
             return Err(Error::Unexpected("Thunder Den reply too large"));
         }
@@ -327,7 +338,7 @@ impl<T: Transport + Send + Sync> HWI for ThunderDen<T> {
         if signed.version != 0 || signed.unsigned_tx != psbt.unsigned_tx {
             return Err(Error::Unexpected("Unsigned transaction changed"));
         }
-        // Core omits witnesses when returning a previous transaction. Keep the
+        // Bitcoin Core omits witnesses when returning a previous transaction. Keep the
         // caller's full transaction only when everything else matches exactly.
         for (before, after) in psbt.inputs.iter().zip(&mut signed.inputs) {
             if let (Some(original), Some(returned)) =
@@ -412,6 +423,7 @@ impl Wallet {
         ])
     }
 
+    // Wallet IDs use Ledger-v2 policy serialization, including the key Merkle root.
     fn id(&self) -> [u8; 32] {
         fn hash(bytes: &[u8]) -> [u8; 32] {
             sha256::Hash::hash(bytes).to_byte_array()

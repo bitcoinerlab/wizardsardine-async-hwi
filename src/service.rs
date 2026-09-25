@@ -32,6 +32,9 @@ use ledger_transport_hidapi::TransportNativeHID;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 
+#[cfg(feature = "thunderden")]
+use crate::thunderden::{HttpTransport, ThunderDen};
+
 #[cfg(feature = "bitbox")]
 use crate::bitbox::{ConfigError, NoiseConfig, NoiseConfigData};
 
@@ -69,6 +72,9 @@ pub enum LockedDevice {
     BitBox02(Box<PairingBitbox02<runtime::TokioRuntime>>),
     /// Unlocks via blind oracle (network required).
     Jade(Jade<jade::SerialTransport>),
+    /// A local QR bridge awaiting identification of an offline Thunder Den device.
+    #[cfg(feature = "thunderden")]
+    ThunderDen(Arc<ThunderDen<HttpTransport>>),
 }
 
 impl Debug for LockedDevice {
@@ -76,6 +82,8 @@ impl Debug for LockedDevice {
         match self {
             Self::BitBox02(_) => f.debug_tuple("LockedDevice::BitBox02").finish(),
             Self::Jade(_) => f.debug_tuple("LockedDevice::Jade").finish(),
+            #[cfg(feature = "thunderden")]
+            Self::ThunderDen(_) => f.debug_tuple("LockedDevice::ThunderDen").finish(),
         }
     }
 }
@@ -265,7 +273,7 @@ where
         version: Option<Version>,
         reason: UnsupportedReason,
     },
-    /// Inner Option is None while unlock is in progress.
+    /// Inner Option is None while unlock or identification is in progress.
     Locked {
         id: String,
         device: Arc<Mutex<Option<LockedDevice>>>,
@@ -302,7 +310,7 @@ where
         }))
     }
 
-    /// Stable device identifier (serial-based when available).
+    /// Device or connection-session identifier (serial-based when available).
     /// Use this as the key for `set_bitbox_config`.
     pub fn id(&self) -> &str {
         match self {
@@ -658,10 +666,28 @@ fn listen<Message, Id>(
     #[cfg(feature = "ledger")]
     let mut ledger_handles = BTreeMap::<String, JoinHandle<()>>::new();
 
+    #[cfg(feature = "thunderden")]
+    let mut thunderden_probe: Option<JoinHandle<Result<HttpTransport, HWIError>>> = None;
+    #[cfg(feature = "thunderden")]
+    let mut thunderden_handle: Option<JoinHandle<()>> = None;
+
     loop {
         // Check for shutdown signal
         if shutdown.load(Ordering::Relaxed) {
             tracing::info!("HWI listener received shutdown signal, exiting");
+            #[cfg(feature = "thunderden")]
+            {
+                if let Some(handle) = thunderden_probe {
+                    handle.abort();
+                }
+                if let Some(handle) = thunderden_handle {
+                    handle.abort();
+                }
+                devices
+                    .lock()
+                    .expect("poisoned")
+                    .retain(|id, _| !id.starts_with("thunderden-"));
+            }
             return;
         }
 
@@ -674,6 +700,16 @@ fn listen<Message, Id>(
         };
 
         tracing::trace!("HID devices refreshed successfully");
+
+        #[cfg(feature = "thunderden")]
+        handle_thunderden(
+            &rt,
+            sender.clone(),
+            &mut thunderden_probe,
+            &mut thunderden_handle,
+            devices.clone(),
+            network,
+        );
 
         #[cfg(feature = "specter")]
         handle_specter_simulator(
@@ -762,6 +798,132 @@ fn listen<Message, Id>(
         tracing::trace!("HWI poll cycle complete, sleeping for 2 seconds");
         std::thread::sleep(Duration::from_secs(2));
     }
+}
+
+#[cfg(feature = "thunderden")]
+fn handle_thunderden<Message, Id>(
+    rt: &tokio::runtime::Handle,
+    sender: channel::Sender<Message>,
+    probe: &mut Option<JoinHandle<Result<HttpTransport, HWIError>>>,
+    handle: &mut Option<JoinHandle<()>>,
+    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message, Id>>>>,
+    network: Network,
+) where
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
+{
+    // Check local bridge availability without blocking discovery of other devices.
+    // The separate identification task waits for the user to scan QR codes.
+    let result = match probe.as_mut() {
+        Some(task) => match futures::FutureExt::now_or_never(task) {
+            Some(result) => Some(result),
+            None => return,
+        },
+        None => None,
+    };
+    let endpoint = std::env::var("THUNDERDEN_BRIDGE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:32123/exchange".into());
+    *probe = Some(rt.spawn(async move { HttpTransport::connect(&endpoint).await }));
+    let Some(result) = result else { return };
+    let transport = result.ok().and_then(Result::ok);
+    let id = transport
+        .as_ref()
+        .map(|t| format!("thunderden-{}", t.session_id()));
+    let mut map = devices.lock().expect("poisoned");
+    if id.as_ref().is_some_and(|id| map.contains_key(id)) {
+        // Keep this session's adapter, even after cancellation, to avoid repeated scans.
+        return;
+    }
+    if let Some(task) = handle.take() {
+        task.abort();
+    }
+    let before = map.len();
+    map.retain(|id, _| !id.starts_with("thunderden-"));
+    let mut changed = map.len() != before;
+    if let Some((transport, id)) = transport.zip(id) {
+        match ThunderDen::new(transport, network) {
+            Ok(device) => {
+                let device = Arc::new(device);
+                let locked = Arc::new(Mutex::new(Some(LockedDevice::ThunderDen(device.clone()))));
+                map.insert(
+                    id.clone(),
+                    SigningDevice::Locked {
+                        id: id.clone(),
+                        kind: DeviceKind::ThunderDen,
+                        pairing_code: None,
+                        device: locked.clone(),
+                    },
+                );
+                *handle = Some(rt.spawn(handle_locked_thunderden(
+                    id,
+                    device,
+                    locked,
+                    devices.clone(),
+                    rt.clone(),
+                    sender.clone(),
+                )));
+                changed = true;
+            }
+            Err(error) => {
+                let _ = sender.send(SigningDeviceMsg::Error(None, error.to_string()).into());
+            }
+        }
+    }
+    drop(map);
+    if changed {
+        let _ = sender.send(SigningDeviceMsg::Update.into());
+    }
+}
+
+#[cfg(feature = "thunderden")]
+async fn handle_locked_thunderden<Message, Id>(
+    id: String,
+    device: Arc<ThunderDen<HttpTransport>>,
+    locked: Arc<Mutex<Option<LockedDevice>>>,
+    devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message, Id>>>>,
+    rt: tokio::runtime::Handle,
+    sender: channel::Sender<Message>,
+) where
+    Message: From<SigningDeviceMsg<Id>> + Send + Clone + 'static,
+    Id: Send + Clone + 'static,
+{
+    locked.lock().expect("poisoned").take();
+    let result = SigningDevice::new(id.clone(), device.clone(), rt, sender.clone()).await;
+    if result.is_err() {
+        *locked.lock().expect("poisoned") = Some(LockedDevice::ThunderDen(device));
+    }
+    let mut map = devices.lock().expect("poisoned");
+    // Do not publish a result for an entry removed or replaced during the QR scan.
+    if !matches!(map.get(&id), Some(SigningDevice::Locked { device, .. }) if Arc::ptr_eq(device, &locked))
+    {
+        return;
+    }
+    let error = match result {
+        Ok(supported) => {
+            map.insert(id, supported);
+            None
+        }
+        Err(HWIError::NetworkMismatch) => {
+            map.insert(
+                id.clone(),
+                SigningDevice::Unsupported {
+                    id,
+                    kind: DeviceKind::ThunderDen,
+                    version: None,
+                    reason: UnsupportedReason::WrongNetwork,
+                },
+            );
+            None
+        }
+        Err(error) => Some(format!(
+            "Thunder Den identification failed: {error}. Restart the bridge to retry."
+        )),
+    };
+    drop(map);
+    if let Some(error) = error {
+        let _ = sender.send(SigningDeviceMsg::Error(None, error).into());
+    }
+    let _ = sender.send(SigningDeviceMsg::Update.into());
 }
 
 #[cfg(feature = "specter")]
@@ -2002,7 +2164,16 @@ fn ledger_version_supported(version: &Version) -> bool {
 }
 
 /// (DeviceKind, min version) - None means all versions support it.
-const DEVICES_COMPATIBLE_WITH_TAPMINISCRIPT: [(DeviceKind, Option<Version>); 5] = [
+const DEVICES_COMPATIBLE_WITH_TAPMINISCRIPT: [(DeviceKind, Option<Version>); 6] = [
+    (
+        DeviceKind::ThunderDen,
+        Some(Version {
+            major: 0,
+            minor: 0,
+            patch: 1,
+            prerelease: None,
+        }),
+    ),
     (
         DeviceKind::Ledger,
         Some(Version {

@@ -244,7 +244,7 @@ async fn http_probe_identifies_bridge_without_an_optical_exchange() {
                 assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
             }
             stream.write_all(format!(
-                "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+                "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nX-Thunderden-Session: 0123456789abcdef0123456789abcdef\r\nConnection: close\r\n\r\n{body}", body.len()
             ).as_bytes()).await.unwrap();
         });
         assert_eq!(HttpTransport::connect(&endpoint).await.is_ok(), found);

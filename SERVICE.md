@@ -49,7 +49,7 @@ let service: HwiService<AppMessage> = HwiService::new(
 Represents a detected hardware wallet in one of three states:
 
 - **`Supported`**: Device is ready for use
-- **`Locked`**: Device requires unlocking (e.g., PIN entry, pairing confirmation)
+- **`Locked`**: Device requires unlocking or identification (e.g., PIN entry, pairing confirmation or QR exchange)
 - **`Unsupported`**: Device detected but cannot be used (wrong version, wrong
 network, etc.)
 
@@ -304,6 +304,8 @@ A `SupportedDevice` provides access to:
 Devices in the `Locked` state require user interaction:
 - **BitBox02**: Requires pairing confirmation on device (displays pairing code)
 - **Jade**: Requires PIN entry and blind oracle authentication
+- **Thunder Den**: Requires one QR identification exchange with the offline device.
+  See [QR sessions](#thunder-den-qr-sessions) below.
 
 The service automatically attempts to unlock devices. Monitor
 `SigningDeviceMsg::Update` for state transitions.
@@ -346,3 +348,65 @@ Minimum versions for Taproot Miniscript support:
 - Coldcard: v6.3.3
 - BitBox02: v9.21.0
 - Specter: All versions
+- Thunder Den: v0.0.1
+
+## Thunder Den QR Sessions
+
+Thunder Den is an offline signer. This library communicates with the offline
+device through the [Thunder Den QR bridge](https://github.com/bitcoinerlab/thunderden-qr-bridge),
+a small HTTP server running on the same online computer as async-hwi. The user
+opens the bridge's web page in a browser on that computer. The page displays
+request QR codes on the screen and uses the computer's camera to scan reply QR
+codes from the offline device running Thunder Den.
+
+This lets the user run async-hwi and handle the QR exchange on one online
+computer. The browser page handles camera capture and QR display, keeping that
+work outside async-hwi so the adapter can focus on the protocol messages. The
+user reviews and approves operations on the offline device, which also does the
+signing.
+
+When the `thunderden` feature is enabled, the service checks for the bridge as
+part of its normal device discovery. It uses
+`http://127.0.0.1:32123/exchange` by default. Set the `THUNDERDEN_BRIDGE_URL`
+environment variable to use another bridge address.
+
+The bridge creates a new session ID each time it starts. The adapter reads this
+ID from the `X-Thunderden-Session` HTTP response header and sends it with later
+requests. If the bridge server restarts, it creates a different session ID and
+rejects requests that still use the old ID. The session ID is public and is
+exchanged automatically.
+
+When the service finds a bridge session that is not already in its list, it
+creates a Thunder Den adapter and marks it as `Locked`
+(`LockedDevice::ThunderDen`). This means the bridge is running, but the service
+still needs to identify the offline device. It sends one `GET_INFO` request,
+which the bridge displays as a QR code. The user scans it with the offline
+device running Thunder Den, then uses the bridge's camera to scan the reply.
+The reply contains the master fingerprint and application version. Once the
+adapter accepts it, the service keeps that adapter and marks it as `Supported`.
+
+If the offline device uses the wrong network, the service marks it as
+`Unsupported` with the reason `UnsupportedReason::WrongNetwork`. If the user
+cancels the identification request, the device stays `Locked`. The service does
+not ask the user to scan again on every check. The user can restart the bridge
+when they are ready to try again.
+
+While the bridge stays available with the same session ID, the service keeps
+the adapter and its cached fingerprint and version. Regular checks contact only
+the HTTP server and need no QR scans. The `Supported` state means the signer was
+identified earlier. Signing and address confirmation each need a new QR
+exchange.
+
+If the service loses contact with the bridge or finds a different session ID,
+it removes the old device entry and cancels any identification request still
+waiting for a reply. A late reply cannot add the old entry back. When the
+service finds the bridge again, it starts identification again. Restarting the
+bridge creates a new session ID even if the offline device still uses the same
+key.
+
+The bridge remembers the fingerprint from its first successful reply. A later
+reply may have a different fingerprint if the user loads another seed or
+passphrase. In that case, the bridge rejects the exchange and ends the session.
+The adapter returns `DeviceDisconnected`, and the service removes the device
+entry on its next check. The user must restart the bridge before identifying
+the new signer. This prevents an existing adapter from silently switching keys.

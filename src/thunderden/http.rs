@@ -4,14 +4,17 @@ use reqwest::{Client, StatusCode, Url};
 use super::{Transport, MAX_REPLY, MAX_REQUEST};
 use crate::Error;
 
-/// Transport to the QR companion on the online computer, not to the signer.
+/// HTTP transport to the local QR bridge on the online computer.
 pub struct HttpTransport {
     client: Client,
     endpoint: Url,
+    session: String,
 }
 
 impl HttpTransport {
-    /// Probe the local bridge without starting an optical exchange.
+    /// Check bridge availability without asking the offline device to scan.
+    /// The transport stays bound to this bridge session; reconnect explicitly
+    /// after a restart or signer change.
     pub async fn connect(endpoint: &str) -> Result<Self, Error> {
         let endpoint = Url::parse(endpoint)
             .map_err(|_| Error::InvalidParameter("url", "Invalid bridge URL".into()))?;
@@ -41,6 +44,16 @@ impl HttpTransport {
             .send()
             .await
             .map_err(|e| Error::Device(e.to_string()))?;
+        if response.status() == StatusCode::PRECONDITION_FAILED {
+            return Err(Error::DeviceDisconnected);
+        }
+        let session = response
+            .headers()
+            .get("x-thunderden-session")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| value.len() == 32 && value.bytes().all(|c| c.is_ascii_hexdigit()))
+            .ok_or(Error::Unexpected("Missing or invalid bridge session"))?
+            .to_string();
         const MARKER: &str = "thunderden-qr-bridge";
         if response.status() != StatusCode::OK
             || response.content_length() != Some(MARKER.len() as u64)
@@ -52,7 +65,16 @@ impl HttpTransport {
         {
             return Err(Error::Unexpected("Not a Thunder Den QR bridge"));
         }
-        Ok(Self { client, endpoint })
+        Ok(Self {
+            client,
+            endpoint,
+            session,
+        })
+    }
+
+    /// Public ID for this bridge session; changes when the bridge restarts.
+    pub fn session_id(&self) -> &str {
+        &self.session
     }
 }
 
@@ -62,15 +84,25 @@ impl Transport for HttpTransport {
         if request.len() > MAX_REQUEST {
             return Err(Error::UnsupportedInput);
         }
-        // No approval timeout or application-level retry: the user operates both cameras.
+        // Allow time for manual QR scans and approval. Never retry a request automatically.
         let mut response = self
             .client
             .post(self.endpoint.clone())
             .header("Content-Type", "application/cbor")
+            .header("X-Thunderden-Session", &self.session)
             .body(request.to_vec())
             .send()
             .await
             .map_err(|e| Error::Device(e.to_string()))?;
+        if response.status() == StatusCode::PRECONDITION_FAILED
+            || response
+                .headers()
+                .get("x-thunderden-session")
+                .and_then(|v| v.to_str().ok())
+                != Some(self.session.as_str())
+        {
+            return Err(Error::DeviceDisconnected);
+        }
         match response.status() {
             StatusCode::OK => {}
             StatusCode::GONE => return Err(Error::UserRefused),
