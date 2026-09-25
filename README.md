@@ -44,7 +44,7 @@ A Empty case means the method is unimplemented on the client or device side.
 | Jade[^3]             | >= v1.0.30 | >= v1.0.30 | >= v1.0.30 | >= v1.0.30 | >= v1.0.30           | >= v1.0.30 | >= v1.0.30 |
 | Ledger Nano S/S+[^4] | >= v2.1.2  | >= v2.1.2  | >= v2.1.2  | >= v2.1.2  | *check hmac presence | >= v2.1.2  | >= v2.1.2  |
 | Specter[^5]          |            | >= v1.8.0  | >= v1.8.0  | >= v1.8.0  |                      |            | >= v1.8.0  |
-| Thunder Den[^6]      |            | yes        | yes        | yes        | *check proof presence | yes        | yes        |
+| Thunder Den[^6]      | >= v0.0.1  | >= v0.0.1  | >= v0.0.1  | >= v0.0.1  | *check hmac presence | >= v0.0.1  | >= v0.0.1  |
 
 [^1]: https://github.com/digitalbitbox/bitbox02-firmware
 [^2]: https://github.com/alfred-hodler/rust-coldcard

@@ -1,6 +1,4 @@
 //! Thunder Den's user-operated QR interface, via a local companion.
-//!
-//! Policies must be validated public descriptors supplied by the caller.
 mod http;
 #[cfg(test)]
 mod tests;
@@ -70,6 +68,8 @@ impl<T: Transport + Send + Sync> ThunderDen<T> {
         })
     }
 
+    /// Use a public descriptor and an optional registration HMAC.
+    /// The caller is responsible for descriptor and checksum validation.
     pub fn with_wallet(
         mut self,
         name: impl Into<String>,
@@ -84,6 +84,10 @@ impl<T: Transport + Send + Sync> ThunderDen<T> {
         // One exchange per client. Holding the async mutex also serializes callers
         // through the HWI trait's shared-reference methods.
         let mut state = self.state.lock().await;
+        // Check GET_INFO's cache under the exchange lock to avoid duplicate scans.
+        if operation == 0 && state.info.is_some() {
+            return Ok(Value::Array(vec![]));
+        }
         state.counter = state
             .counter
             .checked_add(1)
@@ -158,10 +162,6 @@ impl<T: Transport + Send + Sync> ThunderDen<T> {
     }
 
     async fn info(&self) -> Result<(Fingerprint, String), Error> {
-        let cached = self.state.lock().await.info.clone();
-        if let Some(info) = cached {
-            return Ok(info);
-        }
         self.request(0, vec![]).await?;
         self.state
             .lock()
@@ -213,7 +213,6 @@ impl<T: Transport + Send + Sync> HWI for ThunderDen<T> {
     }
 
     async fn get_version(&self) -> Result<Version, Error> {
-        // Unreleased build labels are not fabricated into a semantic version.
         crate::parse_version(&self.info().await?.1)
     }
 
@@ -252,6 +251,8 @@ impl<T: Transport + Send + Sync> HWI for ThunderDen<T> {
         Ok(xpub)
     }
 
+    /// Register a public descriptor with local approval on the signer.
+    /// The caller is responsible for descriptor and checksum validation.
     async fn register_wallet(&self, name: &str, policy: &str) -> Result<Option<[u8; 32]>, Error> {
         let wallet = Wallet::new(name.into(), policy)?;
         if name.is_empty() {

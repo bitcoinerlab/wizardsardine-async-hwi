@@ -41,7 +41,7 @@ fn reply(request: &[u8], result: Vec<Value>) -> Vec<Value> {
         request[1].clone(),
         request[2].clone(),
         bytes(&[1, 2, 3, 4]),
-        Value::Text("development".into()),
+        Value::Text("0.0.1".into()),
         request[3].clone(),
         uint(0),
         Value::Array(result),
@@ -61,11 +61,26 @@ async fn metadata_is_cached_and_futures_are_send() {
         .unwrap()
         .unwrap();
     assert_eq!(fp, Fingerprint::from([1, 2, 3, 4]));
-    assert!(matches!(
-        client.get_version().await,
-        Err(Error::UnsupportedVersion)
-    ));
+    assert_eq!(client.get_version().await.unwrap().to_string(), "0.0.1");
     assert_eq!(client.get_master_fingerprint().await.unwrap(), fp);
+    assert_eq!(client.transport.calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn concurrent_metadata_calls_share_one_exchange() {
+    let client = mock(|request| serde_cbor::to_vec(&reply(request, vec![])).unwrap());
+    let state = client.state.lock().await;
+    let fingerprint = client.get_master_fingerprint();
+    let version = client.get_version();
+    futures::pin_mut!(fingerprint, version);
+    // Queue both callers before either can inspect the empty cache.
+    assert!(futures::poll!(fingerprint.as_mut()).is_pending());
+    assert!(futures::poll!(version.as_mut()).is_pending());
+    drop(state);
+
+    let (fingerprint, version) = tokio::join!(fingerprint, version);
+    assert_eq!(fingerprint.unwrap(), Fingerprint::from([1, 2, 3, 4]));
+    assert_eq!(version.unwrap().to_string(), "0.0.1");
     assert_eq!(client.transport.calls.load(Ordering::Relaxed), 1);
 }
 
