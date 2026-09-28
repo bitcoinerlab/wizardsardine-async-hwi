@@ -59,7 +59,10 @@ impl<T> fmt::Debug for ThunderDen<T> {
 impl ThunderDen<HttpTransport> {
     /// Connect to the local QR bridge without starting a QR exchange.
     /// Uses `THUNDERDEN_BRIDGE_URL` or `http://127.0.0.1:32123/exchange`.
-    /// The first fingerprint or version request starts a QR exchange.
+    ///
+    /// The first fingerprint or version request waits for a QR reply from Thunder Den.
+    /// One reply supplies both values. Keep the same adapter to reuse those answers
+    /// without another scan. A new adapter starts without those saved values.
     pub async fn try_connect(network: Network) -> Result<Self, Error> {
         let endpoint = std::env::var("THUNDERDEN_BRIDGE_URL").ok();
         let transport = HttpTransport::connect(
@@ -79,6 +82,8 @@ impl ThunderDen<HttpTransport> {
     }
 
     /// Discovery ID, stable until the bridge restarts.
+    /// Use it to recognise a connection you already have and keep its adapter.
+    /// This identifies the bridge session, not the signer's keys.
     pub fn id(&self) -> String {
         format!("thunderden-{}", self.transport.session_id())
     }
