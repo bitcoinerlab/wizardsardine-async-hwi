@@ -1,4 +1,4 @@
-//! Client for an offline device running Thunder Den.
+//! Client for a device running Thunder Den.
 //!
 //! The local [QR bridge](https://github.com/bitcoinerlab/thunderden-qr-bridge)
 //! displays request QR codes and captures replies in a browser. This module
@@ -41,7 +41,7 @@ struct State {
     info: Option<(Fingerprint, String)>,
 }
 
-pub struct ThunderDen<T> {
+pub struct ThunderDen<T = HttpTransport> {
     transport: T,
     network: Network,
     state: Mutex<State>,
@@ -53,6 +53,34 @@ impl<T> fmt::Debug for ThunderDen<T> {
         f.debug_struct("ThunderDen")
             .field("network", &self.network)
             .finish()
+    }
+}
+
+impl ThunderDen<HttpTransport> {
+    /// Connect to the local QR bridge without starting a QR exchange.
+    /// Uses `THUNDERDEN_BRIDGE_URL` or `http://127.0.0.1:32123/exchange`.
+    /// The first fingerprint or version request starts a QR exchange.
+    pub async fn try_connect(network: Network) -> Result<Self, Error> {
+        let endpoint = std::env::var("THUNDERDEN_BRIDGE_URL").ok();
+        let transport = HttpTransport::connect(
+            endpoint
+                .as_deref()
+                .unwrap_or("http://127.0.0.1:32123/exchange"),
+        )
+        .await
+        .map_err(|e| {
+            if endpoint.is_some() {
+                e
+            } else {
+                Error::DeviceNotFound
+            }
+        })?;
+        Self::new(transport, network)
+    }
+
+    /// Discovery ID, stable until the bridge restarts.
+    pub fn id(&self) -> String {
+        format!("thunderden-{}", self.transport.session_id())
     }
 }
 

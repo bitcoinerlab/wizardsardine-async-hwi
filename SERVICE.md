@@ -304,7 +304,8 @@ A `SupportedDevice` provides access to:
 Devices in the `Locked` state require user interaction:
 - **BitBox02**: Requires pairing confirmation on device (displays pairing code)
 - **Jade**: Requires PIN entry and blind oracle authentication
-- **Thunder Den**: Requires one QR identification exchange with the offline device.
+- **Thunder Den**: Exchange QR codes with the device running Thunder Den so the
+  wallet app can read its master fingerprint and application version.
   See [QR sessions](#thunder-den-qr-sessions) below.
 
 The service automatically attempts to unlock devices. Monitor
@@ -352,61 +353,69 @@ Minimum versions for Taproot Miniscript support:
 
 ## Thunder Den QR Sessions
 
-Thunder Den is an offline signer. This library communicates with the offline
-device through the [Thunder Den QR bridge](https://github.com/bitcoinerlab/thunderden-qr-bridge),
-a small HTTP server running on the same online computer as async-hwi. The user
-opens the bridge's web page in a browser on that computer. The page displays
-request QR codes on the screen and uses the computer's camera to scan reply QR
-codes from the offline device running Thunder Den.
+Thunder Den runs on a separate laptop and exchanges QR codes with your wallet
+app. Run the [QR bridge](https://github.com/bitcoinerlab/thunderden-qr-bridge) on
+the same computer as your wallet app. Its browser page shows requests and scans
+replies. You review and approve operations on the device running Thunder Den.
 
-This lets the user run async-hwi and handle the QR exchange on one online
-computer. The browser page handles camera capture and QR display, keeping that
-work outside async-hwi so the adapter can focus on the protocol messages. The
-user reviews and approves operations on the offline device, which also does the
-signing.
+### Connect Thunder Den
 
-When the `thunderden` feature is enabled, the service checks for the bridge as
-part of its normal device discovery. It uses
-`http://127.0.0.1:32123/exchange` by default. Set the `THUNDERDEN_BRIDGE_URL`
-environment variable to use another bridge address.
+1. Start Thunder Den and choose the same Bitcoin network as your wallet app.
+2. On the computer with your wallet app, start the bridge with Node.js 22 or later:
 
-The bridge creates a new session ID each time it starts. The adapter reads this
-ID from the `X-Thunderden-Session` HTTP response header and sends it with later
-requests. If the bridge server restarts, it creates a different session ID and
-rejects requests that still use the old ID. The session ID is public and is
-exchanged automatically.
+   ```sh
+   npx @bitcoinerlab/thunderden-qr-bridge
+   ```
 
-When the service finds a bridge session that is not already in its list, it
-creates a Thunder Den adapter and marks it as `Locked`
-(`LockedDevice::ThunderDen`). This means the bridge is running, but the service
-still needs to identify the offline device. It sends one `GET_INFO` request,
-which the bridge displays as a QR code. The user scans it with the offline
-device running Thunder Den, then uses the bridge's camera to scan the reply.
-The reply contains the master fingerprint and application version. Once the
-adapter accepts it, the service keeps that adapter and marks it as `Supported`.
+3. The bridge opens its page in your browser automatically. If it does not,
+   open the address printed in the terminal. Start the service, or open the
+   device list in a wallet app that uses it. The service finds the bridge
+   automatically and asks for the signer's master fingerprint and version.
+   Follow the instructions on the bridge page to complete the QR exchange.
 
-If the offline device uses the wrong network, the service marks it as
-`Unsupported` with the reason `UnsupportedReason::WrongNetwork`. If the user
-cancels the identification request, the device stays `Locked`. The service does
-not ask the user to scan again on every check. The user can restart the bridge
-when they are ready to try again.
+While waiting for the first reply from Thunder Den, the service lists it as
+`Locked`. This means the initial QR exchange is still in progress. Once it
+receives the fingerprint and version, it changes the entry to `Supported`.
 
-While the bridge stays available with the same session ID, the service keeps
-the adapter and its cached fingerprint and version. Regular checks contact only
-the HTTP server and need no QR scans. The `Supported` state means the signer was
-identified earlier. Signing and address confirmation each need a new QR
-exchange.
+The service remembers the fingerprint and version for that connection. Its
+regular checks do not require another QR exchange. Signing a transaction or
+checking an address each needs a new QR exchange.
 
-If the service loses contact with the bridge or finds a different session ID,
-it removes the old device entry and cancels any identification request still
-waiting for a reply. A late reply cannot add the old entry back. When the
-service finds the bridge again, it starts identification again. Restarting the
-bridge creates a new session ID even if the offline device still uses the same
-key.
+### Bridge Address
 
-The bridge remembers the fingerprint from its first successful reply. A later
-reply may have a different fingerprint if the user loads another seed or
-passphrase. In that case, the bridge rejects the exchange and ends the session.
-The adapter returns `DeviceDisconnected`, and the service removes the device
-entry on its next check. The user must restart the bridge before identifying
-the new signer. This prevents an existing adapter from silently switching keys.
+The default address is `http://127.0.0.1:32123/exchange`. To use another port,
+start the bridge with `--port PORT` and set `THUNDERDEN_BRIDGE_URL` to the
+matching address before starting your wallet app. The bridge must run on the
+same computer as the app; the transport accepts HTTP addresses on `127.0.0.1`.
+
+### Applications with Their Own Discovery Loop
+
+Call `ThunderDen::try_connect(network)` to check that the bridge is running and
+create an adapter. This call does not display a QR code. The first call to
+`get_master_fingerprint()` or `get_version()` starts the initial QR exchange and
+waits for the reply from Thunder Den.
+
+One reply supplies both the fingerprint and version. The adapter remembers them,
+so asking it for either value again does not need another scan. Use `device.id()`
+to recognise a connection you already have and keep its existing adapter. A new
+adapter does not inherit the answers saved by an older one.
+
+### Cancellation and Reconnection
+
+- If you cancel the first exchange, the service leaves Thunder Den as `Locked`
+  and does not repeatedly ask you to scan. Restart the bridge when ready to retry.
+- If Thunder Den uses a different Bitcoin network, the service marks it as
+  `Unsupported` with `UnsupportedReason::WrongNetwork`.
+- If the bridge stops or restarts, the service removes its old device entry and
+  cancels any pending initial QR exchange. It starts a fresh exchange when the
+  bridge is available again. A late reply cannot restore the old entry.
+- Restart the bridge before loading different recovery words or a different
+  passphrase. If a reply has a different fingerprint from the first successful
+  reply, the bridge ends the connection. The adapter returns
+  `DeviceDisconnected`, and the service removes the entry on its next check.
+
+The bridge creates a new session ID each time it starts. async-hwi reads it from
+the `X-Thunderden-Session` header and includes it with later requests. This lets
+the bridge reject requests from an old connection, even if the same keys are
+still loaded in Thunder Den. The ID is exchanged automatically; users do not
+need to enter or copy it.

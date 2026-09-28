@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 
 #[cfg(feature = "thunderden")]
-use crate::thunderden::{HttpTransport, ThunderDen};
+use crate::thunderden::ThunderDen;
 
 #[cfg(feature = "bitbox")]
 use crate::bitbox::{ConfigError, NoiseConfig, NoiseConfigData};
@@ -72,9 +72,9 @@ pub enum LockedDevice {
     BitBox02(Box<PairingBitbox02<runtime::TokioRuntime>>),
     /// Unlocks via blind oracle (network required).
     Jade(Jade<jade::SerialTransport>),
-    /// A local QR bridge awaiting identification of an offline Thunder Den device.
+    /// A local QR bridge waiting for the fingerprint and version from Thunder Den.
     #[cfg(feature = "thunderden")]
-    ThunderDen(Arc<ThunderDen<HttpTransport>>),
+    ThunderDen(Arc<ThunderDen>),
 }
 
 impl Debug for LockedDevice {
@@ -667,7 +667,7 @@ fn listen<Message, Id>(
     let mut ledger_handles = BTreeMap::<String, JoinHandle<()>>::new();
 
     #[cfg(feature = "thunderden")]
-    let mut thunderden_probe: Option<JoinHandle<Result<HttpTransport, HWIError>>> = None;
+    let mut thunderden_probe: Option<JoinHandle<Result<ThunderDen, HWIError>>> = None;
     #[cfg(feature = "thunderden")]
     let mut thunderden_handle: Option<JoinHandle<()>> = None;
 
@@ -804,7 +804,7 @@ fn listen<Message, Id>(
 fn handle_thunderden<Message, Id>(
     rt: &tokio::runtime::Handle,
     sender: channel::Sender<Message>,
-    probe: &mut Option<JoinHandle<Result<HttpTransport, HWIError>>>,
+    probe: &mut Option<JoinHandle<Result<ThunderDen, HWIError>>>,
     handle: &mut Option<JoinHandle<()>>,
     devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message, Id>>>>,
     network: Network,
@@ -821,14 +821,17 @@ fn handle_thunderden<Message, Id>(
         },
         None => None,
     };
-    let endpoint = std::env::var("THUNDERDEN_BRIDGE_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:32123/exchange".into());
-    *probe = Some(rt.spawn(async move { HttpTransport::connect(&endpoint).await }));
+    *probe = Some(rt.spawn(ThunderDen::try_connect(network)));
     let Some(result) = result else { return };
-    let transport = result.ok().and_then(Result::ok);
-    let id = transport
-        .as_ref()
-        .map(|t| format!("thunderden-{}", t.session_id()));
+    let device = result.ok().and_then(|result| match result {
+        Ok(device) => Some(device),
+        Err(HWIError::DeviceNotFound | HWIError::DeviceDisconnected) => None,
+        Err(error) => {
+            let _ = sender.send(SigningDeviceMsg::Error(None, error.to_string()).into());
+            None
+        }
+    });
+    let id = device.as_ref().map(ThunderDen::id);
     let mut map = devices.lock().expect("poisoned");
     if id.as_ref().is_some_and(|id| map.contains_key(id)) {
         // Keep this session's adapter, even after cancellation, to avoid repeated scans.
@@ -840,34 +843,27 @@ fn handle_thunderden<Message, Id>(
     let before = map.len();
     map.retain(|id, _| !id.starts_with("thunderden-"));
     let mut changed = map.len() != before;
-    if let Some((transport, id)) = transport.zip(id) {
-        match ThunderDen::new(transport, network) {
-            Ok(device) => {
-                let device = Arc::new(device);
-                let locked = Arc::new(Mutex::new(Some(LockedDevice::ThunderDen(device.clone()))));
-                map.insert(
-                    id.clone(),
-                    SigningDevice::Locked {
-                        id: id.clone(),
-                        kind: DeviceKind::ThunderDen,
-                        pairing_code: None,
-                        device: locked.clone(),
-                    },
-                );
-                *handle = Some(rt.spawn(handle_locked_thunderden(
-                    id,
-                    device,
-                    locked,
-                    devices.clone(),
-                    rt.clone(),
-                    sender.clone(),
-                )));
-                changed = true;
-            }
-            Err(error) => {
-                let _ = sender.send(SigningDeviceMsg::Error(None, error.to_string()).into());
-            }
-        }
+    if let Some((device, id)) = device.zip(id) {
+        let device = Arc::new(device);
+        let locked = Arc::new(Mutex::new(Some(LockedDevice::ThunderDen(device.clone()))));
+        map.insert(
+            id.clone(),
+            SigningDevice::Locked {
+                id: id.clone(),
+                kind: DeviceKind::ThunderDen,
+                pairing_code: None,
+                device: locked.clone(),
+            },
+        );
+        *handle = Some(rt.spawn(handle_locked_thunderden(
+            id,
+            device,
+            locked,
+            devices.clone(),
+            rt.clone(),
+            sender.clone(),
+        )));
+        changed = true;
     }
     drop(map);
     if changed {
@@ -878,7 +874,7 @@ fn handle_thunderden<Message, Id>(
 #[cfg(feature = "thunderden")]
 async fn handle_locked_thunderden<Message, Id>(
     id: String,
-    device: Arc<ThunderDen<HttpTransport>>,
+    device: Arc<ThunderDen>,
     locked: Arc<Mutex<Option<LockedDevice>>>,
     devices: Arc<Mutex<BTreeMap<String, SigningDevice<Message, Id>>>>,
     rt: tokio::runtime::Handle,
